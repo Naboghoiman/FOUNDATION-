@@ -15,9 +15,12 @@ interface DeckVinylViewProps {
   onSync: () => void;
   onSeek: (sample: number) => void;
   onPitchChange: (pct: number) => void;
-  onJogNudge: (nudge: number) => void;
+  onJogNudge?: (nudge: number) => void;
   tempoFamilyLock?: number | null;
   onFileUpload?: (file: File) => void;
+  onScratchBegin?: () => void;
+  onScratchRate?: (rate: number) => void;
+  onScratchEnd?: () => void;
 }
 
 export const DeckVinylView: React.FC<DeckVinylViewProps> = ({
@@ -33,6 +36,9 @@ export const DeckVinylView: React.FC<DeckVinylViewProps> = ({
   onJogNudge,
   tempoFamilyLock,
   onFileUpload,
+  onScratchBegin,
+  onScratchRate,
+  onScratchEnd,
 }) => {
   const [rotationAngle, setRotationAngle] = useState(0);
   const [isScratching, setIsScratching] = useState(false);
@@ -43,6 +49,10 @@ export const DeckVinylView: React.FC<DeckVinylViewProps> = ({
   const [isDragOver, setIsDragOver] = useState(false);
 
   const lastPointerAngleRef = useRef<number>(0);
+  const lastPointerTimeRef = useRef<number>(0);
+  const filteredJogRef = useRef<number>(0);
+  const isInteractingRef = useRef<boolean>(false);
+  const activePointerIdRef = useRef<number | null>(null);
   const vinylRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -55,7 +65,7 @@ export const DeckVinylView: React.FC<DeckVinylViewProps> = ({
       const dt = (now - lastTime) / 1000;
       lastTime = now;
 
-      if (telemetry.isPlaying && !isScratching) {
+      if (telemetry.isPlaying && !isScratching && !isInteractingRef.current) {
         // 33.33 RPM = ~200 deg/sec * effective tempo rate
         const speed = (telemetry.playbackRate || 1.0) * 200;
         setRotationAngle((prev) => (prev + speed * dt) % 360);
@@ -67,49 +77,93 @@ export const DeckVinylView: React.FC<DeckVinylViewProps> = ({
     return () => cancelAnimationFrame(animId);
   }, [telemetry.isPlaying, telemetry.playbackRate, isScratching]);
 
-  // Scratch / Platter drag handling
+  // Scratch & Jog platter handling
   const handlePointerDown = (e: React.PointerEvent) => {
-    if (!vinylMode || !track) return;
-    setIsScratching(true);
-    const rect = vinylRef.current?.getBoundingClientRect();
-    if (rect) {
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      lastPointerAngleRef.current = Math.atan2(e.clientY - cy, e.clientX - cx);
-    }
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!isScratching || !track) return;
+    if (!track) return;
     const rect = vinylRef.current?.getBoundingClientRect();
     if (!rect) return;
+
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
     const currentAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
-    let delta = currentAngle - lastPointerAngleRef.current;
 
-    // Wrap around -PI to PI
+    lastPointerAngleRef.current = currentAngle;
+    lastPointerTimeRef.current = performance.now();
+    isInteractingRef.current = true;
+    activePointerIdRef.current = e.pointerId;
+
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {}
+
+    if (vinylMode) {
+      setIsScratching(true);
+      // Instant platter catch/hold at touchdown
+      onScratchBegin?.();
+      onScratchRate?.(0);
+    } else {
+      filteredJogRef.current = 0;
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!isInteractingRef.current || !track) return;
+    const rect = vinylRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const currentAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
+
+    let delta = currentAngle - lastPointerAngleRef.current;
     if (delta > Math.PI) delta -= Math.PI * 2;
     if (delta < -Math.PI) delta += Math.PI * 2;
 
-    lastPointerAngleRef.current = currentAngle;
+    const nowMs = performance.now();
+    const dtSec = Math.max(0.004, (nowMs - lastPointerTimeRef.current) / 1000);
+
+    // Visual platter rotation matches hand motion
     setRotationAngle((prev) => (prev + (delta * 180) / Math.PI) % 360);
 
-    // Scrub audio
-    const samplesPerRadian = (track.sampleRate * 60) / (33.33 * 2 * Math.PI);
-    const deltaSamples = delta * samplesPerRadian;
-    const newSample = Math.max(0, Math.min(track.totalSamples, telemetry.currentSourceSample + deltaSamples));
-    onSeek(newSample);
+    if (vinylMode) {
+      // VINYL ON = REAL SCRATCH MODE
+      const angularVelocity = delta / dtSec;
+      // 33.33 RPM = 3.49066 rad/sec = 1.0 source speed
+      let scratchRate = angularVelocity / 3.49066;
+      scratchRate = Math.max(-4.0, Math.min(4.0, scratchRate));
+      onScratchRate?.(scratchRate);
+    } else {
+      // VINYL OFF = JOG / PITCH-BEND MODE
+      const angularVelocity = delta / dtSec;
+      const rawJog = Math.max(-0.08, Math.min(0.08, angularVelocity * 0.012));
+      filteredJogRef.current = filteredJogRef.current * 0.70 + rawJog * 0.30;
+      onJogNudge?.(filteredJogRef.current);
+    }
+
+    lastPointerAngleRef.current = currentAngle;
+    lastPointerTimeRef.current = nowMs;
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-    if (isScratching) {
+    if (!isInteractingRef.current) return;
+    isInteractingRef.current = false;
+    activePointerIdRef.current = null;
+
+    try {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {}
+
+    if (vinylMode) {
       setIsScratching(false);
-      try {
-        (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-      } catch {}
+      onScratchEnd?.();
+    } else {
+      filteredJogRef.current = 0;
+      onJogNudge?.(0);
     }
+  };
+
+  const handleLostPointerCapture = (e: React.PointerEvent) => {
+    handlePointerUp(e);
   };
 
   // Time calculations
@@ -264,8 +318,10 @@ export const DeckVinylView: React.FC<DeckVinylViewProps> = ({
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
+            onLostPointerCapture={handleLostPointerCapture}
             className="relative w-64 h-64 md:w-72 md:h-72 rounded-full cursor-grab active:cursor-grabbing select-none flex items-center justify-center transition-transform"
             style={{
+              touchAction: 'none',
               boxShadow: `0 12px 36px rgba(0,0,0,0.95), 0 0 25px ${themeColor}40`,
             }}
           >

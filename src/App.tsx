@@ -451,6 +451,24 @@ export default function App() {
     deck.setJogPitchNudge(nudge);
   }, []);
 
+  const handleScratchBegin = useCallback((deckId: 'A' | 'B') => {
+    if (!controllerRef.current) return;
+    const deck = deckId === 'A' ? controllerRef.current.deckA : controllerRef.current.deckB;
+    deck.beginScratch();
+  }, []);
+
+  const handleScratchRate = useCallback((deckId: 'A' | 'B', rate: number) => {
+    if (!controllerRef.current) return;
+    const deck = deckId === 'A' ? controllerRef.current.deckA : controllerRef.current.deckB;
+    deck.setScratchRate(rate);
+  }, []);
+
+  const handleScratchEnd = useCallback((deckId: 'A' | 'B') => {
+    if (!controllerRef.current) return;
+    const deck = deckId === 'A' ? controllerRef.current.deckA : controllerRef.current.deckB;
+    deck.endScratch();
+  }, []);
+
   const handleVolumeChange = useCallback((deckId: 'A' | 'B', vol: number) => {
     if (!controllerRef.current) return;
     const deck = deckId === 'A' ? controllerRef.current.deckA : controllerRef.current.deckB;
@@ -670,6 +688,9 @@ export default function App() {
               onSeek={(s) => handleSeek('A', s)}
               onPitchChange={(pct) => handlePitchChange('A', pct)}
               onJogNudge={(n) => handleJogNudge('A', n)}
+              onScratchBegin={() => handleScratchBegin('A')}
+              onScratchRate={(r) => handleScratchRate('A', r)}
+              onScratchEnd={() => handleScratchEnd('A')}
               tempoFamilyLock={null}
               onFileUpload={(f) => handleFileUpload('A', f)}
             />
@@ -702,6 +723,9 @@ export default function App() {
               onSeek={(s) => handleSeek('B', s)}
               onPitchChange={(pct) => handlePitchChange('B', pct)}
               onJogNudge={(n) => handleJogNudge('B', n)}
+              onScratchBegin={() => handleScratchBegin('B')}
+              onScratchRate={(r) => handleScratchRate('B', r)}
+              onScratchEnd={() => handleScratchEnd('B')}
               tempoFamilyLock={null}
               onFileUpload={(f) => handleFileUpload('B', f)}
             />

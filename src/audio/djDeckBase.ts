@@ -6,6 +6,7 @@
  */
 
 import { BeatGrid, DeckTelemetry, DiscDjDeckTelemetry, PreparedTrack, TrackData } from '../types/dj';
+import { ScratchTransport } from './scratchTransport';
 
 export class DjDeck {
   public readonly deckId: 'A' | 'B';
@@ -13,6 +14,7 @@ export class DjDeck {
 
   // Audio Nodes
   protected sourceNode: AudioBufferSourceNode | null = null;
+  protected scratchTransport: ScratchTransport | null = null;
   protected gainNode: GainNode;
   protected eqLowNode: BiquadFilterNode;
   protected eqMidNode: BiquadFilterNode;
@@ -85,6 +87,12 @@ export class DjDeck {
     this.eqHighNode.connect(this.filterNode);
     this.filterNode.connect(this.gainNode);
     this.gainNode.connect(this.outputNode);
+
+    // Initialize dedicated AudioWorklet scratch transport
+    this.scratchTransport = new ScratchTransport(this.audioCtx, this.eqLowNode);
+    this.scratchTransport.initialize().catch((err) => {
+      console.warn(`Deck ${this.deckId} scratch transport init fallback:`, err);
+    });
   }
 
   public getTrack(): TrackData | null {
@@ -251,6 +259,10 @@ export class DjDeck {
     this.jogPitchNudge = 0;
     this.pllMultiplier = 1.0;
 
+    if (track.audioBuffer && this.scratchTransport) {
+      this.scratchTransport.loadTrack(track.audioBuffer, 0);
+    }
+
     const chosenBpm = targetBpm ?? track.bpm;
     return {
       track,
@@ -291,7 +303,21 @@ export class DjDeck {
       when = now;
     }
 
-    // If an existing source is playing, smoothly hand off without audio dropout
+    // Preferred continuous AudioWorklet scratch transport
+    if (this.scratchTransport?.isReady()) {
+      this.stopSource();
+      this.scratchTransport.seek(actualSample);
+      this.scratchTransport.setNormalRate(rate);
+      this.scratchTransport.play();
+      this.playStartTime = when;
+      this.playStartSample = actualSample;
+      this.currentSourceSample = actualSample;
+      this.isPlaying = true;
+      this.isPaused = false;
+      return;
+    }
+
+    // Fallback: If an existing source is playing, smoothly hand off without audio dropout
     if (oldSource) {
       try {
         if (when > now + 0.005) {
@@ -339,12 +365,15 @@ export class DjDeck {
   public pause(): void {
     if (!this.isPlaying) return;
     this.updateCurrentPosition();
+    this.scratchTransport?.pause();
     this.stopSource();
     this.isPlaying = false;
     this.isPaused = true;
   }
 
   public stop(): void {
+    this.scratchTransport?.pause();
+    this.scratchTransport?.seek(this.cueSample);
     this.stopSource();
     this.isPlaying = false;
     this.isPaused = true;
@@ -367,7 +396,11 @@ export class DjDeck {
     if (!this.track) return;
     const safeSample = Math.max(0, Math.min(sample, this.track.duration * this.track.sampleRate));
     this.currentSourceSample = safeSample;
-    if (this.isPlaying) {
+    this.playStartSample = safeSample;
+    this.playStartTime = this.audioCtx.currentTime;
+    if (this.scratchTransport?.isReady()) {
+      this.scratchTransport.seek(safeSample);
+    } else if (this.isPlaying) {
       this.play(this.audioCtx.currentTime, safeSample);
     }
   }
@@ -382,7 +415,16 @@ export class DjDeck {
   }
 
   public updateCurrentPosition(): void {
-    if (!this.isPlaying || !this.track || !this.track.audioBuffer) return;
+    if (!this.track || !this.track.audioBuffer) return;
+
+    if (this.scratchTransport?.isScratching()) {
+      this.currentSourceSample = this.scratchTransport.getCursor();
+      this.playStartSample = this.currentSourceSample;
+      this.playStartTime = this.audioCtx.currentTime;
+      return;
+    }
+
+    if (!this.isPlaying) return;
 
     const now = this.audioCtx.currentTime;
     if (now < this.playStartTime) {
@@ -406,10 +448,19 @@ export class DjDeck {
   }
 
   protected reanchorActivePlayback(): void {
-    if (!this.isPlaying || !this.sourceNode) return;
-    const now = this.audioCtx.currentTime;
     const rate = this.getEffectivePlaybackRate();
     if (!Number.isFinite(rate) || rate <= 0) return;
+
+    if (this.scratchTransport?.isReady()) {
+      this.scratchTransport.setNormalRate(rate);
+      const now = this.audioCtx.currentTime;
+      this.playStartTime = now;
+      this.playStartSample = this.currentSourceSample;
+      return;
+    }
+
+    if (!this.isPlaying || !this.sourceNode) return;
+    const now = this.audioCtx.currentTime;
     try {
       if (now >= this.playStartTime) {
         this.sourceNode.playbackRate.setValueAtTime(rate, now);
@@ -421,6 +472,34 @@ export class DjDeck {
     } catch {
       // guard
     }
+  }
+
+  public beginScratch(): void {
+    if (this.scratchTransport?.isReady()) {
+      this.scratchTransport.beginScratch();
+    }
+  }
+
+  public setScratchRate(rate: number): void {
+    if (this.scratchTransport?.isReady()) {
+      this.scratchTransport.setScratchRate(rate);
+    }
+  }
+
+  public endScratch(): void {
+    if (this.scratchTransport?.isReady()) {
+      this.scratchTransport.endScratch();
+      // Section 10: Resume exact current effective rate (locked base tempo / manual tempo)
+      const currentRate = this.getEffectivePlaybackRate();
+      this.scratchTransport.setNormalRate(currentRate);
+      this.currentSourceSample = this.scratchTransport.getCursor();
+      this.playStartTime = this.audioCtx.currentTime;
+      this.playStartSample = this.currentSourceSample;
+    }
+  }
+
+  public getScratchTransport(): ScratchTransport | null {
+    return this.scratchTransport;
   }
 
   protected stopSource(): void {
