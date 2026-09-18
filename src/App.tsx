@@ -237,6 +237,56 @@ export default function App() {
     }
   }, [quantizeMode]);
 
+  const handleToggleDeckSync = useCallback(
+    (deckId: 'A' | 'B') => {
+      const controller = controllerRef.current;
+      if (!controller) return;
+
+      const masterId = controller.getMasterDeckId();
+      const slaveId: 'A' | 'B' =
+        masterId === 'A' ? 'B' : 'A';
+
+      // Preserve the current tested master/slave architecture.
+      // The current master is the reference; only the follower carries sync lock.
+      if (deckId !== slaveId) {
+        setSyncAlert({
+          message:
+            `Deck ${masterId} is the current master. ` +
+            `SYNC LOCK belongs to follower Deck ${slaveId}.`,
+          type: 'info',
+        });
+        return;
+      }
+
+      const slaveDeck =
+        slaveId === 'A'
+          ? controller.deckA
+          : controller.deckB;
+
+      if (slaveDeck.getSync()) {
+        // UNLOCK ONLY.
+        // Existing setSync(false) releases tempoFamilyLock but preserves
+        // the already-active base tempo multiplier and current transport state.
+        slaveDeck.setSync(false);
+
+        setSyncAlert({
+          message:
+            `Deck ${slaveId} SYNC LOCK OFF. ` +
+            `Current matched tempo and playback position were preserved. ` +
+            `Manual rhythmic adjustment is now available.`,
+          type: 'info',
+        });
+
+        return;
+      }
+
+      // LOCK ON:
+      // Use the existing tested synchronization path unchanged.
+      handleTriggerVdj8Sync(slaveId);
+    },
+    [handleTriggerVdj8Sync]
+  );
+
   // Transport handlers
   const handlePlayPause = useCallback(
     (deckId: 'A' | 'B') => {
@@ -616,7 +666,7 @@ export default function App() {
               isMaster={masterDeckId === 'A'}
               onPlayPause={() => handlePlayPause('A')}
               onCue={() => handleCue('A')}
-              onSync={() => handleTriggerVdj8Sync('A')}
+              onSync={() => handleToggleDeckSync('A')}
               onSeek={(s) => handleSeek('A', s)}
               onPitchChange={(pct) => handlePitchChange('A', pct)}
               onJogNudge={(n) => handleJogNudge('A', n)}
@@ -630,7 +680,7 @@ export default function App() {
               telemetry={telemetryA}
               onPlayPause={() => handlePlayPause('A')}
               onCue={() => handleCue('A')}
-              onSync={() => handleTriggerVdj8Sync('A')}
+              onSync={() => handleToggleDeckSync('A')}
               onSeek={(s) => handleSeek('A', s)}
               tempoFamilyLock={null}
               onFileUpload={(f) => handleFileUpload('A', f)}
@@ -648,7 +698,7 @@ export default function App() {
               isMaster={masterDeckId === 'B'}
               onPlayPause={() => handlePlayPause('B')}
               onCue={() => handleCue('B')}
-              onSync={() => handleTriggerVdj8Sync('B')}
+              onSync={() => handleToggleDeckSync('B')}
               onSeek={(s) => handleSeek('B', s)}
               onPitchChange={(pct) => handlePitchChange('B', pct)}
               onJogNudge={(n) => handleJogNudge('B', n)}
@@ -662,7 +712,7 @@ export default function App() {
               telemetry={telemetryB}
               onPlayPause={() => handlePlayPause('B')}
               onCue={() => handleCue('B')}
-              onSync={() => handleTriggerVdj8Sync('B')}
+              onSync={() => handleToggleDeckSync('B')}
               onSeek={(s) => handleSeek('B', s)}
               tempoFamilyLock={null}
               onFileUpload={(f) => handleFileUpload('B', f)}

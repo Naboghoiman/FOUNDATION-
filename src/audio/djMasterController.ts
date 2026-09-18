@@ -176,9 +176,13 @@ export class DjMasterController extends BaseDjMasterController {
       }
     });
 
-    // RESTORE: phase controller telemetry only
-    slaveDeck.setPLLMultiplier(1.0);
-    slaveDeck.setJogPitchNudge(0);
+    // While SYNC LOCK is ON, keep the existing stable OMWELU rule.
+    // While SYNC LOCK is OFF, this controller becomes observation-only
+    // and must not write to manual playback controls.
+    if (slaveTelemetry.isSync) {
+      slaveDeck.setPLLMultiplier(1.0);
+      slaveDeck.setJogPitchNudge(0);
+    }
 
     // Continuously sync looper to master deck (no PLL)
     this.audioLooperEngine.updateContinuousSync(masterDeck);
