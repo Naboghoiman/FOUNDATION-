@@ -1,0 +1,89 @@
+
+    const masterTelemetry = masterDeck.getTelemetry();
+    const slaveTelemetry = slaveDeck.getTelemetry();
+
+    // If there is no running reference clock, retain the original MASAVU cue behaviour.
+    if (!masterTelemetry.isPlaying) {
+      slaveDeck.setTempoFamilyLock(null);
+      const fallback = super.triggerBeatPerfectSlaveStart(quantizeMode);
+      this.vdj8LastSlaveStartPlan = null;
+      return fallback;
+    }
+
+    const masterBpm = masterTelemetry.effectiveBpm > 20
+      ? masterTelemetry.effectiveBpm
+      : masterTrack.bpm;
+
+    const plan = this.vdj8StyleSyncEngine.createLaunchPlan({
+      audioContextCurrentTime: this.audioCtx.currentTime,
+      outputSampleRate: this.audioCtx.sampleRate,
+      masterTrack,
+      slaveTrack,
+      masterCurrentSourceSample: masterDeck.getCurrentSourceSample(),
+      slaveCurrentSourceSample: slaveDeck.getCurrentSourceSample(),
+      masterEffectiveBpm: masterBpm,
+      slaveIsPlaying: slaveTelemetry.isPlaying,
+      quantizeMode
+    });
+
+    // The master is never tempo-family constrained by its slave.
+    masterDeck.setTempoFamilyLock(null);
+
+    // Prepare stable slave tempo before any start/re-anchor operation.
+    slaveDeck.setSync(true);
+    slaveDeck.setJogPitchNudge(0);
+    slaveDeck.setPLLMultiplier(1.0);
+    slaveDeck.setTempoFamilyLock(plan.baseTempoMultiplier);
+
+    // Keep the pitch control display coherent without allowing it to override sync tempo.
+    const neededPitchDelta = Math.abs(plan.baseTempoMultiplier - 1.0);
+    const currentRange = slaveDeck.getPitchRange();
+    if (neededPitchDelta > currentRange) {
+      slaveDeck.setPitchRange(Math.min(1.0, Math.max(0.16, neededPitchDelta * 1.05)));
+    }
+    const effectiveRange = slaveDeck.getPitchRange();
+    if (Number.isFinite(effectiveRange) && Math.abs(effectiveRange) > 1e-6) {
+      const pitchPct = (plan.baseTempoMultiplier - 1.0) / effectiveRange;
+      slaveDeck.setPitchPercentage(Math.max(-1.0, Math.min(1.0, pitchPct)));
+    }
+    slaveDeck.setTempoFamilyLock(plan.baseTempoMultiplier);
+    slaveDeck.setBaseTempoMultiplier(plan.baseTempoMultiplier);
+
+    if (slaveTelemetry.isPlaying) {
+      // One controlled re-anchor at a future master beat. No repeated seek loop.
+      slaveDeck.syncAlignToMaster(
+        plan.targetOutputTime,
+        plan.slaveSourceSample,
+        plan.baseTempoMultiplier
+      );
+    } else {
+      // Critical fix: start from the SELECTED matching slave beat/kick, not the
+      // arbitrary current read-head sample.
+      slaveDeck.play(plan.targetOutputTime, plan.slaveSourceSample);
+    }
+
+    this.syncEngine.resetController();
+    this.masavuPhaseController.reset();
+    this.masavuPhaseController.setDesiredGrooveOffsetMs(plan.desiredGrooveOffsetMs ?? 0);
+    this.vdj8LastSlaveStartPlan = plan;
+    return plan;
+  }
+
+  public updatePhaseController(): MasavuPhaseTelemetry {
+    const masterDeck = this.getMasterDeckId() === 'A' ? this.deckA : this.deckB;
+    const slaveDeck = this.getMasterDeckId() === 'A' ? this.deckB : this.deckA;
+
+    const masterTrack = masterDeck.getTrack();
+    const slaveTrack = slaveDeck.getTrack();
+
+    masterDeck.updateCurrentPosition();
+    slaveDeck.updateCurrentPosition();
+
+    const masterTelemetry = masterDeck.getTelemetry();
+    const slaveTelemetry = slaveDeck.getTelemetry();
+
+    if (!masterTrack || !slaveTrack) {
+      return {
+        phaseErrorMs: 0,
+        phaseErrorDegrees: 0,
+        masterBpm: masterTrack ? masterTrack.bpm : 120,
